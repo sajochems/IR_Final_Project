@@ -8,7 +8,7 @@ class DocT5Query:
 
     def __init__(self):
         self.marco_path = "datasets/MSMARCO.tar"
-        self.max_docs = 1000
+        self.max_docs = 10000
         self.num_queries_to_append = 3
 
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -25,24 +25,47 @@ class DocT5Query:
         print("Loaded marco dataset with shape:", df.shape)
         return df
 
-    def append_queries(self, df):
+    def append_queries(self, df, batch_size=64):
+        # Limit the number of documents to process
         df = df[:self.max_docs]
-        queries = np.empty((len(df), self.num_queries_to_append), dtype=object)
-        for i in tqdm(range(len(df))):
-            doc_text = df.iloc[i, 1]
-            doc_tokens = self.tokenizer.encode(doc_text, return_tensors='pt').to(self.device)
+        docs = df.iloc[:, 1].tolist()  # Assuming the text is in the second column
+
+        all_queries = []
+        # Process documents in mini-batches
+        for i in tqdm(range(0, len(docs), batch_size)):
+            batch_docs = docs[i : i + batch_size]
+            # Batch tokenize with padding/truncation
+            inputs = self.tokenizer(
+                batch_docs,
+                return_tensors="pt",
+                padding=True,
+                truncation=True
+            ).to(self.device)
+
+            # Generate queries in batch
             outputs = self.model.generate(
-                input_ids=doc_tokens,
+                **inputs,
                 max_length=64,
                 do_sample=True,
                 top_k=10,
-                num_return_sequences=self.num_queries_to_append)
+                num_return_sequences=self.num_queries_to_append
+            )
 
-            for j in range(3):
-                queries[i, j] = self.tokenizer.decode(outputs[j], skip_special_tokens=True)
+            # Reshape outputs: shape becomes (batch_size, num_return_sequences, sequence_length)
+            outputs = outputs.view(len(batch_docs), self.num_queries_to_append, -1)
 
-        # df['queries'] = queries
+            # Decode generated outputs
+            for batch_out in outputs:
+                batch_queries = [
+                    self.tokenizer.decode(seq, skip_special_tokens=True)
+                    for seq in batch_out
+                ]
+                all_queries.append(batch_queries)
+
+        # Convert the list of lists to a numpy array if needed
+        queries = np.array(all_queries, dtype=object)
         return queries
+
 
 
     def example(self):
