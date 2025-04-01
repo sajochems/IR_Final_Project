@@ -36,6 +36,13 @@ class DocT5Query:
         print("Loading antique finished")
         return antique
 
+    def load_marco_ir(self):
+        # Load the MARCO dataset using ir_datasets
+        print("Loading MARCO dataset")
+        marco = ir_datasets.load("msmarco-passage/train")
+        print("Loading MARCO finished")
+        return marco
+
     def load_data(self):
         # Load documents, queries, and qrels from TSV files.
         # Documents: assumed columns: [docno, text]
@@ -181,24 +188,22 @@ class DocT5Query:
         for i in range(3):
             print(f'sample {i + 1}: {self.tokenizer.decode(outputs[i], skip_special_tokens=True)}')
 
-    def create_appended(self):
-        # Load and convert the iterator to a list for reuse.
-        antique = self.load_antique()
-
-        # self.max_docs = antique.docs_count()
-
-        # doc_list = list(antique.docs_iter())
+    def create_appended(self, dataset, save_path, limit_docs=True):
+        if not limit_docs:
+            self.max_docs = dataset.docs_count()
 
         # Create a DataFrame and generate queries.
         print("creating df")
-        df = pd.DataFrame.from_records(self.safe_docs_iter(antique), columns=['docno', 'text'])
+        df = pd.DataFrame.from_records(self.safe_docs_iter(dataset), columns=['docno', 'text'])
+        print("created df with shape:", df.shape)
         queries = self.generate_queries(df)
 
         if len(queries) != len(df):
             print("Warning: The number of generated queries does not match the number of documents.")
+            print("  Generated queries shape:", queries.shape)
+            print("  Documents shape:", df.shape)
 
 
-    # Build the appended_docs list with a nested list comprehension, using tqdm for the outer loop.
         appended_docs = [
             {
                 'docno': row.docno,
@@ -211,10 +216,9 @@ class DocT5Query:
 
         # Save the appended documents to a TSV file.
         appended_df = pd.DataFrame(appended_docs)
-        appended_df.to_csv(self.antique_documents_appended_path, sep='\t', index=False, header=False)
-        print("Appended documents saved to:", self.antique_documents_appended_path)
+        appended_df.to_csv(save_path, sep='\t', index=False, header=False)
+        print("Appended documents saved to:", save_path)
 
-        pass
 
     def safe_docs_iter(self, dataset):
         """
@@ -222,14 +226,17 @@ class DocT5Query:
         If a document raises a UnicodeDecodeError, it is skipped.
         """
         it = dataset.docs_iter()
+        err_count = 0
         while True:
             try:
                 yield next(it)
             except (UnicodeDecodeError, RuntimeError) as e:
-                print("Error encountered, skipping doc:", e)
+                # print("Error encountered, skipping doc:", e)
+                err_count += 1
                 continue
             except StopIteration:
                 break
+        print("Skipped", err_count, "documents due to decoding errors.")
 
 if __name__ == "__main__":
     print("Running DocT5Query script")
@@ -240,6 +247,6 @@ if __name__ == "__main__":
     # print(queries.shape)
     # print(queries[-10:])
 
-    docT5Query.create_appended()
+    docT5Query.create_appended(docT5Query.load_marco_ir(), docT5Query.marco_documents_appended_path, limit_docs=False)
 
     # docT5Query.evaluate_bm25()
