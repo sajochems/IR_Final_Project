@@ -19,6 +19,7 @@ class DocT5Query:
         self.marco_queries_path = "datasets/MSMARCO/queries.dev.tsv"
         self.marco_qrels_path = "datasets/MSMARCO/qrels.dev.tsv"
         self.index_dir = r"C:\Users\Wouter\Documents\Projects\IR_Final_Project\index"
+        self.output_dir = r"C:\Users\Wouter\Documents\Projects\IR_Final_Project\output"
         self.max_docs = 1000
         self.num_queries_to_append = 5
         self.batch_size = 16
@@ -35,6 +36,7 @@ class DocT5Query:
         antique = ir_datasets.load("antique/test")
         print("Loading antique finished")
         return antique
+
 
     def load_marco_ir(self):
         # Load the MARCO dataset using ir_datasets
@@ -68,42 +70,76 @@ class DocT5Query:
 
         return documents, queries, qrels
 
-    def build_index(self, documents):
+    def build_index(self, documents, dirname):
         # PyTerrier expects an iterator of dictionaries.
         # Build an index from the documents dataframe using IterDictIndexer.
+        start = time.time()
         print("building index")
         documents['docno'] = documents['docno'].astype(str)
 
-        os.makedirs(self.index_dir, exist_ok=True)
-        print("Index directory created at:", self.index_dir)
-        indexer = pt.IterDictIndexer(self.index_dir)
+        path = os.path.join(self.index_dir, dirname)
+        os.makedirs(path, exist_ok=True)
+        print("Index directory created at:", path)
+        indexer = pt.IterDictIndexer(path, verbose=True)
         index_ref = indexer.index(documents.to_dict('records'), fields=['docno', 'text'])
-        print("index built")
+        end = time.time()
+        print("Index built in", end - start, "seconds")
         return pt.IndexFactory.of(index_ref)
 
-    def load_index(self, documents):
-        if os.path.exists(self.index_dir) and os.path.isdir(self.index_dir):
+    def load_index(self, documents, dirname):
+        path = os.path.join(self.index_dir, dirname)
+        if os.path.exists(path) and os.path.isdir(path):
             print("Loading index from disk.")
-            return pt.IndexFactory.of(self.index_dir)
+            return pt.IndexFactory.of(path)
         else:
             print("Index directory does not exist. Building index from scratch.")
-            return self.build_index(documents)
+            return self.build_index(documents, dirname)
 
     def clean_query(self, query):
         # Remove punctuation that may cause Terrier's parser to choke.
         # This replaces any non-alphanumeric character (except whitespace) with a space.
         return re.sub(r'[^\w\s]', ' ', query)
 
-    def evaluate_bm25(self):
+    def evaluate_bm25(self, dataset_name):
         # Load data from files
-        documents, queries, qrels = self.load_data()
+        # documents, queries, qrels = self.load_data()
+        doc_path = None
+        if dataset_name == 'msmarco':
+            dataset = self.load_marco_ir()
+            dirname = "marco_index"
+        elif dataset_name == 'msmarco_appended':
+            dataset = self.load_marco_ir()
+            dirname = "marco_appended_index"
+            doc_path = self.marco_documents_appended_path
+        elif dataset_name == 'antique_appended':
+            dataset = self.load_antique()
+            dirname = "antique_appended_index"
+            doc_path = self.antique_documents_appended_path
+        else:
+            dataset = self.load_antique()
+            dirname = "antique_index"
+            dataset_name = 'antique'
+
+        print("loaded dataset:", dataset_name)
+
+        print("converting documents to dataframe")
+        if dataset_name == 'msmarco' or dataset_name == 'antique':
+            documents = pd.DataFrame.from_records(self.safe_iter(dataset.docs_iter()), columns=['docno', 'text'])
+        else:
+            documents = pd.read_csv(doc_path, sep='\t', header=None, names=['docno', 'text'])
+        queries = pd.DataFrame.from_records(self.safe_iter(dataset.queries_iter()), columns=['qid', 'query'])
+        queries['query'] = queries['query'].apply(self.clean_query)
+        qrels = pd.DataFrame.from_records(dataset.qrels_iter(), columns=['qid', 'docno', 'label', 'iteration'])
+        qrels = qrels.drop(columns=['iteration'])
+        qrels['qid'] = qrels['qid'].astype(str)
+
         # Build the PyTerrier index from the document collection.
-        index = self.load_index(documents)
+        index = self.load_index(documents, dirname)
 
 
         print("Index loaded")
         # Create a BM25 retrieval model using PyTerrier's BatchRetrieve.
-        bm25 = pt.terrier.Retriever(index, wmodel="BM25")
+        bm25 = pt.terrier.Retriever(index, wmodel="BM25", verbose=True, threads=1)
 
         print("Running BM25 retrieval")
         # Retrieve results for the queries.
@@ -112,9 +148,19 @@ class DocT5Query:
         # Evaluate the BM25 results.
         # The qrels dataframe should have columns: qid, docno, rel.
         print("Evaluating results")
-        eval_results = pt.Utils.evaluate(results, qrels, metrics=["map", "ndcg", "recip_rank"])
+        eval_results = pt.Evaluate(results, qrels, metrics=["map", "ndcg", "recip_rank"])
         print("Evaluation Results:")
         print(eval_results)
+
+        ## Save the eval results to a CSV file
+        date_time = time.strftime("%Y%m%d-%H%M%S")
+        output_path = os.path.join(self.output_dir, f"{dataset_name}_eval_results_{date_time}.csv")
+        os.makedirs(self.output_dir, exist_ok=True)
+        df = pd.DataFrame([eval_results])
+        df.to_csv(output_path, index=False)
+        print(f"Results saved to {output_path}")
+
+        return eval_results
 
 
 
@@ -194,7 +240,7 @@ class DocT5Query:
 
         # Create a DataFrame and generate queries.
         print("creating df")
-        df = pd.DataFrame.from_records(self.safe_docs_iter(dataset), columns=['docno', 'text'])
+        df = pd.DataFrame.from_records(self.safe_iter(dataset), columns=['docno', 'text'])
         print("created df with shape:", df.shape)
         queries = self.generate_queries(df)
 
@@ -220,12 +266,11 @@ class DocT5Query:
         print("Appended documents saved to:", save_path)
 
 
-    def safe_docs_iter(self, dataset):
+    def safe_iter(self, it):
         """
         Yields documents from dataset.docs_iter() while handling UnicodeDecodeError.
         If a document raises a UnicodeDecodeError, it is skipped.
         """
-        it = dataset.docs_iter()
         err_count = 0
         while True:
             try:
@@ -246,7 +291,24 @@ if __name__ == "__main__":
     # print("Queries:")
     # print(queries.shape)
     # print(queries[-10:])
+    # dataset = docT5Query.load_antique()
 
-    docT5Query.create_appended(docT5Query.load_marco_ir(), docT5Query.marco_documents_appended_path, limit_docs=False)
+    # queries = pd.DataFrame.from_records(dataset.queries_iter())
+    # qrels = pd.DataFrame.from_records(dataset.qrels_iter(), columns=['qid', 'docno', 'label', 'iteration'])
 
-    # docT5Query.evaluate_bm25()
+    # print(qrels.head())
+    # print(qrels['label'].unique())
+    # print("Queries:")
+    # print(dataset.queries_metadata())
+    # print(dataset.qrels_metadata())
+
+    # docT5Query.create_appended(docT5Query.load_marco_ir(), docT5Query.marco_documents_appended_path, limit_docs=False)
+
+    # df = pd.read_json("hf://datasets/macavaney/codec/documents.jsonl.gz", lines=True)
+
+    # docT5Query.create_appended(ir_datasets.load("codec"), "datasets/codec/collection_appended.tsv")
+
+    docT5Query.evaluate_bm25("msmarco")
+    docT5Query.evaluate_bm25("msmarco_appended")
+    docT5Query.evaluate_bm25("antique_appended")
+    docT5Query.evaluate_bm25("antique")
