@@ -4,6 +4,7 @@ import os
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
+import matplotlib.pyplot as plt
 
 
 def average_precision(ranked_list, relevant_docnos):
@@ -25,10 +26,13 @@ def average_precision(ranked_list, relevant_docnos):
         return 0.0
     return precision_sum / len(relevant_docnos)
 
-def reciprocal_rank(ranked_list, relevant_docnos):
+def reciprocal_rank(ranked_list, relevant_docnos, k=None):
     """
-    Returns reciprocal rank (1/rank of first relevant doc)
+    Returns reciprocal rank (1 / rank of first relevant doc),
+    considering only the top k results if k is provided.
     """
+    if k is not None:
+        ranked_list = ranked_list[:k]
     for i, docno in enumerate(ranked_list, start=1):
         if docno in relevant_docnos:
             return 1.0 / i
@@ -36,24 +40,26 @@ def reciprocal_rank(ranked_list, relevant_docnos):
 
 def ndcg(ranked_list, relevant_docnos, k=None):
     """
-    Returns nDCG (with binary relevance). If k is given, evaluate only top-k.
+    Returns nDCG (with binary relevance) evaluated over the top k results.
+    If k is not provided, the entire ranked_list is used.
     """
     if k is not None:
         ranked_list = ranked_list[:k]
 
-    # Gains: relevant => gain of 1, non-relevant => gain of 0
+    # Compute gains: 1 if the document is relevant, else 0
     gains = [1.0 if d in relevant_docnos else 0.0 for d in ranked_list]
 
-    # DCG
+    # Compute Discounted Cumulative Gain (DCG)
     dcg = 0.0
     for i, g in enumerate(gains, start=1):
         dcg += g / np.log2(i + 1)
 
-    # IDCG (for binary relevance, that’s basically as if all relevant docs are on top)
-    # i.e. the ideal ranking has all relevant docs first
-    # The number of relevant docs is len(relevant_docnos).
-    # If that is bigger than len(ranked_list), clamp it.
-    ideal_gains = [1.0]*min(len(relevant_docnos), len(ranked_list)) + [0.0]*(len(ranked_list) - min(len(relevant_docnos), len(ranked_list)))
+    # Compute Ideal DCG (IDCG)
+    # For binary relevance, the ideal ranking puts all relevant docs at the top.
+    # The number of positions to fill is the length of the truncated list.
+    ideal_count = min(len(relevant_docnos), len(ranked_list))
+    ideal_gains = [1.0] * ideal_count + [0.0] * (len(ranked_list) - ideal_count)
+
     idcg = 0.0
     for i, g in enumerate(ideal_gains, start=1):
         idcg += g / np.log2(i + 1)
@@ -161,6 +167,15 @@ def ndcg(ranked_list, relevant_docnos, k=None):
 #     }
 #     return metrics
 
+# def evaluate(path_to_results, qrles_df):
+#     ## load results from file
+#     results = pd.read_csv(path_to_results, sep=',', dtype={'qid': str, 'docno': str, 'score': float})
+#
+#     pt.Experiment(
+#         [results],
+#         qrles_df,  # Use rewritten queries
+#         eval_metrics=[RR @ 10, nDCG @ 20, MAP],
+#     )
 
 def evaluate_in_stream(path_to_results, qrels_df, chunksize=100_000):
     """
@@ -235,8 +250,8 @@ def evaluate_in_stream(path_to_results, qrels_df, chunksize=100_000):
                 relevant_docs = qrels_dict.get(qid, set())
 
                 ap = average_precision(ranked_docs, relevant_docs)
-                rr = reciprocal_rank(ranked_docs, relevant_docs)
-                nd = ndcg(ranked_docs, relevant_docs, k=None)
+                rr = reciprocal_rank(ranked_docs, relevant_docs, k=10)
+                nd = ndcg(ranked_docs, relevant_docs, k=20)
 
                 sum_ap += ap
                 sum_ndcg_ += nd
@@ -285,9 +300,47 @@ def doc_generator(df, chunk_size=None):
     if error_count > 0:
         print(f"Skipped {error_count} documents with null text.")
 
-# def doc_generator(df, chunk_size):
-#     for start in tqdm(range(0, len(df), chunk_size), desc="Building index"):
-#         chunk = df.iloc[start:start+chunk_size]
-#         for row in tqdm(chunk.itertuples(index=False), desc="processing chunk", total=len(chunk), leave=False):
-#             yield {'docno': str(row.docno), 'text': row.text}
-#         gc.collect()  # Help Python clear memory
+
+def plot_results():
+    # Data from CSV
+    metrics = ['MAP', 'NDCG', 'Reciprocal Rank']
+    # antique
+    # doc_values = [0.33403741824881583,0.5488317950973486,0.8566959064327484]
+    # bm25_values = [0.44460569950244383,0.5983482852072701,0.912570767195767]
+
+    # ms marco
+    doc_values = [0.15460591447933805,0.22356504664093496,0.15734730804094244]
+    bm25_values = [0.17527114204981067,0.29806899894774774,0.17846779766971171]
+
+    # Set the positions of the bars on the x-axis
+    x = np.arange(len(metrics))
+    width = 0.35  # width of the bars
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+
+    # Create bars for each method
+    rects1 = ax.bar(x - width/2, doc_values, width, label='docTTTTTquery')
+    rects2 = ax.bar(x + width/2, bm25_values, width, label='BM25')
+
+    # Add labels, title, and custom x-axis tick labels
+    ax.set_ylabel('Scores')
+    ax.set_title('Results evaluated on the MSMARCO Passage dataset')
+    ax.set_xticks(x)
+    ax.set_xticklabels(metrics)
+    ax.legend()
+
+    # Function to add labels on top of each bar
+    def autolabel(rects):
+        for rect in rects:
+            height = rect.get_height()
+            ax.annotate(f'{height:.3f}',
+                        xy=(rect.get_x() + rect.get_width()/2, height),
+                        xytext=(0, 3),  # 3 points vertical offset
+                        textcoords="offset points",
+                        ha='center', va='bottom')
+
+    autolabel(rects1)
+    autolabel(rects2)
+
+    plt.tight_layout()
+    plt.show()

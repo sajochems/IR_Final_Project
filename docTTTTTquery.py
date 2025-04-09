@@ -15,6 +15,7 @@ import re
 import ir_datasets
 import ftfy
 
+import utils
 from utils import evaluate_in_stream, doc_generator
 
 
@@ -34,7 +35,7 @@ class DocT5Query:
         self.max_docs = 1000
         self.num_queries_to_append = 5
         self.batch_size = 16
-        self.batch_size_bm25 = 10000
+        self.batch_size_bm25 = 1000
 
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         print("Using device:", self.device)
@@ -45,7 +46,7 @@ class DocT5Query:
 
     def load_antique(self):
         print("Loading antique documents")
-        antique = ir_datasets.load("antique/test")
+        antique = ir_datasets.load("antique/train")
         print("Loading antique finished")
         return antique
 
@@ -53,7 +54,7 @@ class DocT5Query:
     def load_marco_ir(self):
         # Load the MARCO dataset using ir_datasets
         print("Loading MARCO dataset")
-        marco = ir_datasets.load("msmarco-passage/train/judged")
+        marco = ir_datasets.load("msmarco-passage/dev")
         print("Loading MARCO finished")
         print("Documents count:", marco.docs_count())
         print("Queries count:", marco.queries_count())
@@ -137,19 +138,23 @@ class DocT5Query:
         doc_path = None
         if dataset_name == 'msmarco':
             dataset = self.load_marco_ir()
-            dirname = "marco_index"
+            dirname_index = "marco_index"
+            dirname = "marco"
         elif dataset_name == 'msmarco_appended':
             dataset = self.load_marco_ir()
-            dirname = "marco_appended_index"
+            dirname_index = "marco_appended_index"
+            dirname = "marco_appended"
             # doc_path = self.marco_documents_appended_path
             doc_path = self.final_save_path
         elif dataset_name == 'antique_appended':
             dataset = self.load_antique()
-            dirname = "antique_appended_index"
+            dirname_index = "antique_appended_index"
+            dirname = "antique_appended"
             doc_path = self.antique_documents_appended_path
         else:
             dataset = self.load_antique()
-            dirname = "antique_index"
+            dirname_index = "antique_index"
+            dirname = "antique"
             dataset_name = 'antique'
 
         print("loaded dataset:", dataset_name)
@@ -184,7 +189,7 @@ class DocT5Query:
                 print("Columns:", documents.columns)
 
 
-            index = self.load_index(documents, dirname)
+            index = self.load_index(documents, dirname_index)
             print("Index loaded")
             # Create a BM25 retrieval model using PyTerrier's BatchRetrieve.
             bm25 = pt.terrier.Retriever(index, wmodel="BM25", verbose=False, threads=1)
@@ -210,19 +215,23 @@ class DocT5Query:
         doc_path = None
         if dataset_name == 'msmarco':
             dataset = self.load_marco_ir()
-            dirname = "marco_index"
+            dirname_index = "marco_index"
+            dirname = "marco"
         elif dataset_name == 'msmarco_appended':
             dataset = self.load_marco_ir()
-            dirname = "marco_appended_index"
+            dirname_index = "marco_appended_index"
+            dirname = "marco_appended"
             # doc_path = self.marco_documents_appended_path
             doc_path = self.final_save_path
         elif dataset_name == 'antique_appended':
             dataset = self.load_antique()
-            dirname = "antique_appended_index"
+            dirname_index = "antique_appended_index"
+            dirname = "antique_appended"
             doc_path = self.antique_documents_appended_path
         else:
             dataset = self.load_antique()
-            dirname = "antique_index"
+            dirname_index = "antique_index"
+            dirname = "antique"
             dataset_name = 'antique'
 
         path = os.path.join("output", dirname, self.bm25_out_path)
@@ -239,6 +248,21 @@ class DocT5Query:
         print("evaluating in chunks")
 
         eval_results = evaluate_in_stream(path, qrels, chunksize=chunksize)
+
+
+        # results = pd.read_csv(path, sep=',', dtype={'qid': str, 'docno': str, 'score': float})
+        # documents = pd.DataFrame.from_records(dataset.docs_iter(), columns=['docno', 'text'])
+        # index = self.load_index(documents, dirname_index)
+        # bm25 = pt.terrier.Retriever(index, wmodel="BM25", verbose=False, threads=1)
+
+        # eval_results = pt.Experiment(
+        #     [bm25],
+        #     queries,
+        #     qrels,  # Use rewritten queries
+        #     eval_metrics=[RR @ 10, nDCG @ 20, MAP],
+        # )
+
+        # eval_results = pt.Evaluate(results, qrels, metrics=[RR @ 10, nDCG @ 20, MAP])
 
         date_time = time.strftime("%Y%m%d-%H%M%S")
         output_path = os.path.join(self.output_dir, f"{dataset_name}_eval_results_{date_time}.csv")
@@ -538,17 +562,23 @@ if __name__ == "__main__":
     # docT5Query.interp_appended()
 
     print("Evaluating BM25")
-    # docT5Query.evaluate_bm25("msmarco")
+    docT5Query.inference_bm25("antique")
+    docT5Query.inference_bm25("antique_appended")
+    docT5Query.inference_bm25("msmarco")
     docT5Query.inference_bm25("msmarco_appended")
-    # docT5Query.evaluate_bm25("antique_appended")
-    # docT5Query.evaluate_bm25("antique")
 
-    # docT5Query.evaluate_bm25_chunk("msmarco")
+    docT5Query.evaluate_bm25_chunk("antique")
+    docT5Query.evaluate_bm25_chunk("antique_appended")
+    docT5Query.evaluate_bm25_chunk("msmarco")
     docT5Query.evaluate_bm25_chunk("msmarco_appended")
+
+
 
 
     # docT5Query.hotfix_appended()
     # docT5Query.interp_appended()
     # docT5Query.calc_missing()
+
+    # utils.plot_results()
 
 
